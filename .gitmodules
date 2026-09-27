@@ -1,0 +1,3 @@
+[submodule "submodules/diff-triangle-rasterization"]
+	path = submodules/diff-triangle-rasterization
+	url = https://github.com/trianglesplatting/diff-triangle-rasterization.git
