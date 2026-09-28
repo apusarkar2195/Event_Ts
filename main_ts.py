@@ -1757,30 +1757,36 @@ class SLAM():
         loss_total = None
         pose_optimizer.zero_grad()
         
+        # TODO : code need to change
         # densification setting
-        self.gs_cfg.refine_start_iter = self.config["mapping"]["refine_start_iter"]
-        self.gs_cfg.refine_stop_iter= self.config["mapping"]["refine_stop_iter"]
-        self.gs_cfg.refine_every = self.config["mapping"]["refine_every"]
+        # self.gs_cfg.refine_start_iter = self.config["mapping"]["refine_start_iter"]
+        # self.gs_cfg.refine_stop_iter= self.config["mapping"]["refine_stop_iter"]
+        # self.gs_cfg.refine_every = self.config["mapping"]["refine_every"]
         
+        self.ts_config.refine_start_iter = self.config["mapping"]["refine_start_iter"]
+        self.ts_config.refine_stop_iter= self.config["mapping"]["refine_stop_iter"]
+        self.ts_config.refine_every = self.config["mapping"]["refine_every"]
+        
+        # TODO : code need to change
         # Densification Strategy
-        strategy_BA = DefaultStrategy(
-            verbose=True,
-            scene_scale=self.scene_scale,
-            prune_opa=self.gs_cfg.prune_opa,
-            grow_grad2d=self.gs_cfg.grow_grad2d,
-            grow_scale3d=self.gs_cfg.grow_scale3d,
-            prune_scale3d=self.gs_cfg.prune_scale3d,
-            # refine_scale2d_stop_iter=4000, # splatfacto behavior
-            refine_start_iter=self.gs_cfg.refine_start_iter,
-            refine_stop_iter=self.gs_cfg.refine_stop_iter,
-            refine_every=self.gs_cfg.refine_every,
+        # strategy_BA = DefaultStrategy(
+        #     verbose=True,
+        #     scene_scale=self.scene_scale,
+        #     prune_opa=self.gs_cfg.prune_opa,
+        #     grow_grad2d=self.gs_cfg.grow_grad2d,
+        #     grow_scale3d=self.gs_cfg.grow_scale3d,
+        #     prune_scale3d=self.gs_cfg.prune_scale3d,
+        #     # refine_scale2d_stop_iter=4000, # splatfacto behavior
+        #     refine_start_iter=self.gs_cfg.refine_start_iter,
+        #     refine_stop_iter=self.gs_cfg.refine_stop_iter,
+        #     refine_every=self.gs_cfg.refine_every,
             
-            reset_every=self.gs_cfg.reset_every,
-            absgrad=self.gs_cfg.absgrad,
-            revised_opacity=self.gs_cfg.revised_opacity,
-        )
-        strategy_BA.check_sanity(self.splats, self.optimizers)
-        strategy_state_BA = strategy_BA.initialize_state()
+        #     reset_every=self.gs_cfg.reset_every,
+        #     absgrad=self.gs_cfg.absgrad,
+        #     revised_opacity=self.gs_cfg.revised_opacity,
+        # )
+        # strategy_BA.check_sanity(self.splats, self.optimizers)
+        # strategy_state_BA = strategy_BA.initialize_state()
         
         training_batch_size = self.config["BA"]["training_batch_size"]
         visualize_every_iter = self.config["BA"]["visualize_every_iter"]
@@ -1788,6 +1794,14 @@ class SLAM():
             save_path = os.path.join(self.config["data"]["output"], self.config["data"]["exp_name"], "global_BA")
         else:
             save_path = os.path.join(self.config["data"]["output"], self.config["data"]["exp_name"], "BA")
+        
+        # TODO : TS adaptive mode controler
+        new_round = False
+        removed_them = False
+        opacity_now = True
+        total_dead = 0
+        large_screne = self.splats_non_learnable["large"]
+        
         for i in range(_num_iters):
             if i%100 == 0:
                 blur_sigma = blur_sigma/2
@@ -1830,21 +1844,25 @@ class SLAM():
                 T_SE3_ev_start = self.get_poses_lie(active_ctrl_knot_se3, active_ctrl_knot_ts, t_ev_start, mode=traj_mode)
                 T_SE3_ev_end = self.get_poses_lie(active_ctrl_knot_se3, active_ctrl_knot_ts, t_ev_end, mode=traj_mode)
                 
+                # TODO : code changed
                 c2w_start = T_SE3_ev_start.matrix().unsqueeze(0).cuda()  #[1, 4, 4]
-                render_pkg_start = self.rasterize_splats(camtoworlds=c2w_start, render_mode="RGB+ED")
+                render_pkg_start = self.rasterize_splats(self.splats, self.splats_non_learnable, c2w_start)
                 c2w_end = T_SE3_ev_end.matrix().unsqueeze(0).cuda()  #[1, 4, 4]
-                render_pkg_end = self.rasterize_splats(camtoworlds=c2w_end, render_mode="RGB+ED")
+                render_pkg_end = self.rasterize_splats(self.splats, self.splats_non_learnable, c2w_end)
                 
-                img_ev_start = render_pkg_start["image"]
-                img_ev_end = render_pkg_end["image"]
+                img_ev_start = render_pkg_start["render"]
+                img_ev_end = render_pkg_end["render"]
                 
-                strategy_BA.step_pre_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=strategy_state_BA,
-                    step=i,
-                    info=render_pkg_end["info"],
-                )
+                # TODO : code need to be changed
+                # No need for the gradient informatio
+
+                # strategy_BA.step_pre_backward(
+                #     params=self.splats,
+                #     optimizers=self.optimizers,
+                #     state=strategy_state_BA,
+                #     step=i,
+                #     info=render_pkg_end["info"],
+                # )
                 
                 if self.config["use_linLog"]:
                     pred_linlog_start = lin_log(img_ev_start*255, linlog_thres=linlog_thres) # (B, Nevs, 1)
@@ -1897,8 +1915,33 @@ class SLAM():
             
             # tikhonov regularization loss
             tr_w = self.config["mapping"]["tr_loss_weight"]
-            loss_tr = tr_w*tikhonov_regularization(render_pkg_start["depth"].unsqueeze(-1))
+            loss_tr = tr_w*tikhonov_regularization(render_pkg_start["surf_depth"].squeeze().unsqueeze(-1)) # 1,H,W -----> H,W,1
             
+            #=================================================================================
+            # TODO : adaptive density controler
+            if not new_round and removed_them:
+                new_round = True
+                removed_them = False
+            else:
+                new_round = True
+
+            # largest distance from point to center of the image
+            triangle_area = render_pkg_start["density_factor"].detach()    
+            # largest distance from point after applyting sigma to center of image
+            image_size = render_pkg_start["scaling"].detach()   
+            importance_score = render_pkg_start["max_blending"].detach()
+
+            if new_round:
+                mask = triangle_area > 1
+                self.splats_non_learnable["triangle_area"][mask] += 1
+
+            mask = image_size > self.splats_non_learnable["image_size"]
+            self.splats_non_learnable["image_size"][mask] = image_size[mask]
+            mask = importance_score > self.splats_non_learnable["importance_score"]
+            self.splats_non_learnable["importance_score"][mask] = importance_score[mask]    
+            #=================================================================================
+
+
             loss_event = loss_event/len(indices)
             loss_ssim = loss_ssim/len(indices)
             loss_no_event = loss_no_event/len(indices)
@@ -1910,23 +1953,108 @@ class SLAM():
             loss_total = loss_event + loss_ssim + loss_white_balance + loss_no_event + loss_tr
             
             loss_total.backward()
+
+            # TODO : code need to be changed
             # loss_total = None
-            for optimizer in self.optimizers.values():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            # for optimizer in self.optimizers.values():
+            #     optimizer.step()
+            #     optimizer.zero_grad(set_to_none=True)
+
+            # TS parameter optimizer
+            self.optimizers.step()
+            self.optimizers.zero_grad(set_to_none = True)
             
             if _opt_pose:
                 pose_optimizer.step()
                 pose_optimizer.zero_grad()
             
+            # TODO : Code need to be changed
             # densification
-            strategy_BA.step_post_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=strategy_state_BA,
-                step=i,
-                info=render_pkg_end["info"],
-            )
+
+            # strategy_BA.step_post_backward(
+            #     params=self.splats,
+            #     optimizers=self.optimizers,
+            #     state=strategy_state_BA,
+            #     step=i,
+            #     info=render_pkg_end["info"],
+            # )
+
+            #======================================================================================
+            # TODO : Need to check the with torch.no_grad() case as specified bt tsplat repo
+            # TODO : Adaptive Densification for triangles
+            if i % 1000 == 0:
+                total_dead =0
+
+            if i < self.ts_config.densify_until_iter and i % self.ts_config.densification_interval == 0 and i > self.ts_config.densify_from_iter:
+                if new_round:
+                    dead_mask = torch.logical_or((self.splats_non_learnable["importance_score"]  < self.ts_config.importance_threshold).squeeze(), (opacity_activation(self.splats.opacity) <= self.ts_config.opacity_dead).squeeze())
+                else:
+                    dead_mask = (opacity_activation(self.splats.opacity) <= self.ts_config.opacity_dead).squeeze()
+
+                if i > 1000 and not new_round:
+                    mask_test = self.splats_non_learnable["triangle_area"] < 2
+                    dead_mask = torch.logical_or(dead_mask, mask_test.squeeze())
+
+                total_dead += dead_mask.sum()
+
+                if self.ts_config.proba_distr == 0:
+                    oddGroup = True
+                elif self.ts_config.proba_distr == 1:
+                    oddGroup = False
+                else:
+                    if opacity_now:
+                        oddGroup = opacity_now
+                        opacity_now = False
+                    else:
+                        oddGroup = opacity_now
+                        opacity_now = True        
+
+                removed_them = True
+                new_round = False
+
+                #==========================
+                print('**************************From main SLAM********************************************')
+                print(f'Before Densification total Triangle : {self.splats.triangles_points.shape[0]}')
+                print(f"Total Dead Triangles are : {total_dead}")
+                print('************************************************************************************')
+                #==========================
+
+                # TODO : need to fix this functions
+                add_new_triangles(self.splats, self.splats_non_learnable, self.optimizers, cap_max=self.ts_config.max_shapes, oddGroup=oddGroup, dead_mask=dead_mask)        
+
+                #==========================
+                print('**************************From main SLAM********************************************')
+                print(f'After Densification total Triangle : {self.splats.triangles_points.shape[0]}')
+                print(f"New Triangle Area : {self.splats_non_learnable['triangle_area']}")
+                print(f"New Image Size : {self.splats_non_learnable['image_size']}")
+                print(f"New Importance Score : {self.splats_non_learnable['importance_score']}")
+                print('************************************************************************************')
+                #========================== 
+
+            if i > self.ts_config.densify_until_iter and i % self.ts_config.densification_interval == 0:
+                if not new_round:
+                    dead_mask = torch.logical_or((self.splats_non_learnable["importance_score"]  < self.ts_config.importance_threshold).squeeze(), (opacity_activation(self.splats.opacity) <= self.ts_config.opacity_dead).squeeze())
+                else:
+                    dead_mask = (opacity_activation(self.splats.opacity) <= self.ts_config.opacity_dead).squeeze()
+
+                if not new_round:
+                    mask_test = self.splats_non_learnable["triangle_area"] < 2
+                    dead_mask = torch.logical_or(dead_mask, mask_test.squeeze())
+
+                # TODO : need to fix this function
+                remove_final_points(self.splats, self.splats_non_learnable, dead_mask)
+                
+                removed_them = True
+                new_round = False 
+
+            # if iter < self.ts_config.iterations:
+            #     self.optimizers.step()
+            #     self.optimizers.zero_grad(set_to_none = True)
+                # for optimizer in self.optimizers.values():
+                #     optimizer.step()
+                #     optimizer.zero_grad(set_to_none=True)
+            #======================================================================================        
+            
             
             # visualization
             frame_id_vis = frame_id_all[-1]
@@ -2008,8 +2136,9 @@ class SLAM():
                         ts = active_frame_ts_all[n]                      
                         T_SE3 = self.get_poses_lie(active_ctrl_knot_se3, active_ctrl_knot_ts, ts, mode=traj_mode)
                         
+                        # TODO : code changed
                         c2w_ = T_SE3.matrix().unsqueeze(0).cuda()  #[1, 4, 4]
-                        rendered_img = self.rasterize_splats(camtoworlds=c2w_, render_mode="RGB+ED")["image"]
+                        rendered_img = self.rasterize_splats(self.splats, self.splats_non_learnable, c2w_)["render"]
                                 
                                 
                         event_img_ = rendered_img.detach().cpu().numpy()
@@ -2017,6 +2146,8 @@ class SLAM():
                         im_name = f"BA_f{frame_id_vis:03}_f{k}" + "_img.jpg"
                         imageio.imwrite(os.path.join(save_path, im_name), event_img_)
                         
+                        # TODO: code need to be changed
+                        # self.config["render_tumvie_rgbCam_img"] = False in the setting
                         if self.config["render_tumvie_rgbCam_img"] and self.config["dataset"]=="tum_vie":
                             # render rbg camera image
                             img_rgbCam = self.render_with_gsplat(self.gs_model, T_se3, render_tumvie_rgb=True)['image']
@@ -2761,8 +2892,8 @@ class SLAM():
                     print("******* use gt pose to render images *******")
                     for tmp_idx_ in self.dataset.val_img_idx:
                         c2w_ = self.dataset.original_gt_poses[tmp_idx_].reshape(-1, 4, 4).cuda()
-                        render_pkg_ = self.rasterize_splats(camtoworlds=c2w_, render_mode="RGB")
-                        event_img_ = render_pkg_["image"].detach().cpu().numpy()
+                        render_pkg_ = self.rasterize_splats(self.splats, self.splats_non_learnable,c2w_)
+                        event_img_ = render_pkg_["render"].detach().cpu().numpy()
                         
                         event_img_ =  to8b(event_img_)
                         im_name = f"f{tmp_idx_}_{float(self.dataset.original_gt_poses_ts[tmp_idx_]):07.3f}s.jpg"
@@ -2787,8 +2918,8 @@ class SLAM():
                         T_SE3 = self.get_poses_lie(active_ctrl_knot_se3, active_ctrl_knot_ts, ts, mode="linear")
                         
                         c2w_ = T_SE3.matrix().unsqueeze(0).cuda()  #[1, 4, 4]
-                        render_pkg_ = self.rasterize_splats(camtoworlds=c2w_, render_mode="RGB")
-                        event_img_ = render_pkg_["image"].detach().cpu().numpy()
+                        render_pkg_ = self.rasterize_splats(self.splats, self.splats_non_learnable, c2w_)
+                        event_img_ = render_pkg_["render"].detach().cpu().numpy()
                         
                         event_img_ =  to8b(event_img_)
                         im_name = f"f{idx_}_{ts:07.3f}s.jpg"
