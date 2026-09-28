@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from tsplat.utils.triangle_utils import fibonacci_sphere, generate_triangles_in_chunks
 from tsplat.utils.graphics_utils import focal2fov, getProjectionMatrix
 from tsplat.renderer import render
-from tsplat.adaptive_control import add_new_triangles, remove_final_points
+from tsplat.adaptive_control import add_new_triangles, add_new_triangles_without_splitting, remove_final_points
 # import tyro
 from torch import Tensor
 from plyfile import PlyData, PlyElement
@@ -289,7 +289,7 @@ def pcd_2_ts(
     sigmas = inverse_exponential_activation(torch.ones((number_of_points, 1), dtype=torch.float, device="cuda") *  init_sigma)
 
     params = [
-        ("triangle_points", torch.nn.Parameter(points_per_triangle), 0.0018),
+        ("triangles_points", torch.nn.Parameter(points_per_triangle), 0.0018),
         ("opacity", torch.nn.Parameter(opacities), 0.014),
         ("sigma", torch.nn.Parameter(sigmas), 0.0008),
         ("mask", torch.nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device=device)), 0)
@@ -305,7 +305,7 @@ def pcd_2_ts(
         "nb_points" : nb_points,
         "max_sh_degree" : sh_degree,
         "active_sh_degree" : 0,
-        "max_radii2d" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
+        "max_radii2D" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
         "max_density_factor" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
         "denom" : torch.empty(0),
         "spatial_lr_scale" : 0,
@@ -432,7 +432,7 @@ def create_splats_with_optimizers(
         "nb_points" : nb_points,
         "max_sh_degree" : sh_degree,
         "active_sh_degree" : 0,
-        "max_radii2d" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
+        "max_radii2D" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
         "max_density_factor" : torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float, device="cuda"),
         "denom" : torch.empty(0),
         "spatial_lr_scale" : 0,
@@ -926,7 +926,7 @@ class SLAM():
                         )
                 # TODO : need to implement the add_new_ts without pruning triangles
                 # This functions just add the new points only no  pruning        
-                add_new_gs(self.splats, self.splats_non_learnable, self.optimizers, new_gs) 
+                add_new_triangles(self.splats, self.splats_non_learnable, self.optimizers, new_gs) 
             else:
                 feature_dim = 32 if self.ts_config.app_opt else None
                 self.splats, self.splats_non_learnable, self.optimizers = create_splats_with_optimizers(
@@ -2699,9 +2699,12 @@ class SLAM():
                         # self.gs_model.add_new_points(new_pcd, 8.25)
                         feature_dim = 32 if self.ts_config.app_opt else None
                         print(f"============================= point num:{new_pcd.points.shape[0]} ===============================")
+                        
+                        #TODO : changed the code
+                        print(f"Numbers of triagles before adding new TS: {len(self.splats['triangles_points'])}")
                         if(new_pcd.points.shape[0]>50):
                             #  TODO : Change code
-                            new_ts = pcd_2_ts(
+                            new_splat, new_splat_non_learnable = pcd_2_ts(
                                 points= new_pcd.points.detach().cpu(),
                                 init_opacity=self.ts_config.set_opacity,
                                 init_sigma = self.ts_config.set_sigma,
@@ -2712,10 +2715,10 @@ class SLAM():
                                 feature_dim=feature_dim,
                                 device=self.device,
                                 )
-                            add_new_ts_without_removing(self.splats, self.splats_non_learnable, self.optimizers)    
+                            add_new_triangles_without_splitting(self.splats, self.splats_non_learnable, self.optimizers, new_splat, new_splat_non_learnable)
                             # add_new_gs(self.splats, self.optimizers, new_gs)
-                            print("Number of New TS:", len(new_gs["triangles_points"]))
-                            print("Number of TS:", len(self.splats["triangles_points"]))
+                            print("Number of New TS:", len(new_splat["triangles_points"]))
+                            print("Number of TS after adding new TS:", len(self.splats["triangles_points"]))
                         else:
                             print("Not enough points to create a new GS, skipped.")
                     

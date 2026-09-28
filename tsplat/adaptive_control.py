@@ -245,95 +245,48 @@ def prune_points(splat, splat_non_learnable, optimizer, mask):
     splat_non_learnable["number_of_points"] = number_of_points
 
 
-def add_new_triangles_without_removing(splat, splat_non_learnable, optimizer, cap_max, oddGroup=True, dead_mask=None):
-    current_num_points = splat.opacity.shape[0]
-    target_num = min(cap_max, int(splat_non_learnable["add_shape"] * current_num_points))
-    num_gs = max(0, target_num - current_num_points)
+def add_new_triangles_without_splitting(splat, splat_non_learnable, optimizer, new_splat, new_splat_non_learnable):
+    d = {
+        "triangles_points": new_splat.triangles_points,
+        "sh0": new_splat.sh0,
+        "shN": new_splat.shN,
+        "opacity": new_splat.opacity,
+        "sigma" : new_splat.sigma,
+        "mask": new_splat.mask
+    }
 
-    num_gs += dead_mask.sum()
+    optimizable_tensors = cat_tensors_to_optimizer(optimizer, d)
+    splat.triangles_points = optimizable_tensors["triangles_points"]
+    splat.sh0 = optimizable_tensors["sh0"]
+    splat.shN = optimizable_tensors["shN"]
+    splat.opacity = optimizable_tensors["opacity"]
+    splat.sigma = optimizable_tensors["sigma"]
+    splat.mask = optimizable_tensors["mask"]
 
-    if num_gs <= 0:
-        return 0
+    splat_non_learnable["denom"] = torch.zeros((splat.triangles_points.shape[0], 1), device="cuda")
+    splat_non_learnable["max_radii2D"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
+    splat_non_learnable["max_density_factor"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
+    splat_non_learnable["triangle_area"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
 
-    if oddGroup:
-        probs = opacity_activation(splat.opacity).squeeze(-1) 
-    else:
-        eps = torch.finfo(torch.float32).eps
-        probs = exponential_activation(splat.sigma).squeeze(-1) 
-        probs = 1 / (probs + eps)
-        
-    probs[dead_mask] = 0
+    splat_non_learnable["max_scaling"] = torch.cat((splat_non_learnable["max_scaling"], new_splat_non_learnable["max_scaling"]),dim=0)
 
-    compar = splat_non_learnable["image_size"]
-    big_mask   = compar > splat_non_learnable["split_size"]
+    num_points_per_triangle = []
+    for i in range(splat.triangles_points.size(0)):
+        num_points_per_triangle.append(splat.triangles_points[i].shape[0])
+    tensor_num_points_per_triangle = torch.tensor(num_points_per_triangle, dtype=torch.int, device='cuda:0')
+    cumsum_of_points_per_triangle = torch.cumsum(torch.nn.functional.pad(tensor_num_points_per_triangle, (1,0), value=0), 0, dtype=torch.int)[:-1]
+    number_of_points = splat.triangles_points.shape[0]
 
-    add_idx = sample_alives(probs=probs, num=num_gs, big_mask=big_mask)
-
-    big_mask   = compar[add_idx] > splat_non_learnable["split_size"]
-    small_mask = ~big_mask
-    big_indices   = add_idx[big_mask]
-    small_indices = add_idx[small_mask]
-
-    num_big = big_indices.shape[0]
-    if num_big > 0:
-
-        (split_triangles_points,
-        split_sh0,
-        split_shN,
-        split_opacity,
-        split_sigma,
-        split_mask) = update_params(splat, splat_non_learnable, big_indices)
-
-    else:
-        split_triangles_points  = torch.empty((0, 3, 3),   device=splat.triangles_points.device)
-        split_sh0    = torch.empty((0,) + splat.sh0.shape[1:],   device=splat.sh0.device) # TODO : need to fix sh0 dim = N,0:1,K where as feate_dc shape = N,3,0:1
-        split_shN  = torch.empty((0,) + splat.shN.shape[1:], device=splat.shN.device) # TODO : need to fix shN dim = N,1:,3 where as feate_rest shape = N,3,1:
-        split_opacity        = torch.empty((0, 1), device=splat.opacity.device)
-        split_sigma          = torch.empty((0, 1), device=splat.sigma.device)
-        split_mask           = torch.empty((0, 1), device=splat.mask.device)
-
-
-    num_small = small_indices.shape[0]
-    if num_small > 0:
-        (clone_triangles_points,
-        clone_sh0,
-        clone_shN,
-        clone_opacity,
-        clone_sigma,
-        clone_mask) = update_params_small(splat, splat_non_learnable, small_indices)
-
-    else:
-        clone_triangles_points  = torch.empty((0, 3, 3),   device=splat.triangles_points.device)
-        clone_sh0    = torch.empty((0,) + splat.sh0.shape[1:],   device=splat.sh0.device)
-        clone_shN  = torch.empty((0,) + splat.shN.shape[1:], device=splat.shN.device)
-        clone_opacity        = torch.empty((0, 1), device=splat.opacity.device)
-        clone_sigma          = torch.empty((0, 1), device=splat.sigma.device)
-        clone_mask           = torch.empty((0, 1), device=splat.mask.device)
-
-    new_triangles_points = torch.cat([split_triangles_points, clone_triangles_points], dim=0)
-    #==========================
-    print('**********************************************************************')
-    print(f'New triangle points to be added : {new_triangles_points.shape[0]}')
-    print(f"Number of trinangles to be removed : {len(add_idx)}")
-    print('***********************************************************************')
-    #==========================
-    new_sh0   = torch.cat([split_sh0,   clone_sh0],   dim=0)
-    new_shN = torch.cat([split_shN, clone_shN], dim=0)
-    new_opacity       = torch.cat([split_opacity,       clone_opacity],       dim=0)
-    new_sigma         = torch.cat([split_sigma,         clone_sigma],         dim=0)
-    new_mask          = torch.cat([split_mask,          clone_mask],          dim=0)
-
-    densification_postfix(splat, splat_non_learnable, optimizer, new_triangles_points, new_sh0, new_shN, new_opacity, new_sigma, new_mask)
-    replace_tensors_to_optimizer(splat, optimizer, inds=add_idx)
-
-    mask = torch.zeros(splat.opacity.shape[0], dtype=torch.bool)
-    mask[add_idx] = True
-    mask[torch.nonzero(dead_mask, as_tuple=True)] = True
-    prune_points(splat, splat_non_learnable, optimizer, mask)
+    splat_non_learnable["num_points_per_triangle"] = tensor_num_points_per_triangle
+    splat_non_learnable["cumsum_of_points_per_triangle"] = cumsum_of_points_per_triangle
+    splat_non_learnable["number_of_points"] = number_of_points
 
     splat_non_learnable["triangle_area"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
     splat_non_learnable["image_size"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
-    splat_non_learnable["importance_score"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")
+    splat_non_learnable["importance_score"] = torch.zeros((splat.triangles_points.shape[0]), device="cuda")    
+
+
+
 
 def add_new_triangles(splat, splat_non_learnable, optimizer, cap_max, oddGroup=True, dead_mask=None):
     current_num_points = splat.opacity.shape[0]
@@ -401,17 +354,18 @@ def add_new_triangles(splat, splat_non_learnable, optimizer, cap_max, oddGroup=T
         clone_mask           = torch.empty((0, 1), device=splat.mask.device)
 
     new_triangles_points = torch.cat([split_triangles_points, clone_triangles_points], dim=0)
+    new_sh0   = torch.cat([split_sh0,   clone_sh0],   dim=0)
+    new_shN = torch.cat([split_shN, clone_shN], dim=0)
+    new_opacity       = torch.cat([split_opacity,       clone_opacity],       dim=0)
+    new_sigma         = torch.cat([split_sigma,         clone_sigma],         dim=0)
+    new_mask          = torch.cat([split_mask,          clone_mask],          dim=0)
+
     #==========================
     print('**********************************************************************')
     print(f'New triangle points to be added : {new_triangles_points.shape[0]}')
     print(f"Number of trinangles to be removed : {len(add_idx)}")
     print('***********************************************************************')
     #==========================
-    new_sh0   = torch.cat([split_sh0,   clone_sh0],   dim=0)
-    new_shN = torch.cat([split_shN, clone_shN], dim=0)
-    new_opacity       = torch.cat([split_opacity,       clone_opacity],       dim=0)
-    new_sigma         = torch.cat([split_sigma,         clone_sigma],         dim=0)
-    new_mask          = torch.cat([split_mask,          clone_mask],          dim=0)
 
     densification_postfix(splat, splat_non_learnable, optimizer, new_triangles_points, new_sh0, new_shN, new_opacity, new_sigma, new_mask)
     replace_tensors_to_optimizer(splat, optimizer, inds=add_idx)
